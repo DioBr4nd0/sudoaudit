@@ -1,128 +1,103 @@
-use rip::install::InstallOptions;
-use rip::venv::VirtualEnvironment;
-use std::process::Command;
 use std::path::PathBuf;
-use std::env;
+use std::process::Command;
 
-pub async fn install(project_dir:&PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+/// Installs Slither into a managed virtual environment.
+/// This is the only function you need to call.
+pub fn install(project_dir: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let venv_path = project_dir.join("slither-env");
 
-    println!("🔧 Attempting rip-based setup...");
+    println!("🔧 Setting up Slither environment...");
 
-    match setup_with_rip(&venv_path).await {
+    // There is no fallback. This is the only method.
+    match setup_environment(&project_dir, &venv_path) {
         Ok(path) => {
-            println!("✅ Rip-based setup successful!");
-            println!("📍 Slither binary: {}", path.display());
-            return Ok(());
+            println!("\n✅ Setup successful!");
+            println!("📍 Slither binary is available at: {}", path.display());
+            Ok(())
         }
         Err(e) => {
-            println!("⚠️  Rip approach failed: {}", e);
-            println!("🔄 Falling back to system command approach...");
+            eprintln!("\n❌ Setup failed: {}", e);
+            Err(e)
         }
     }
-
-    match setup_with_setup_commands(&project_dir, &venv_path) {
-        Ok(path) => {
-            println!("✅ System command setup successful!");
-            println!("📍 Slither binary: {}", path.display());
-        }
-        Err(e) => {
-            eprintln!("❌ All approaches failed: {}", e);
-            return Err(e.into());
-        }
-    }
-    Ok(())
 }
 
-async fn setup_with_rip(venv_path: &PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let venv = VirtualEnvironment::create(venv_path).await?;
-    let install_options = InstallOptions::default();
-    venv.install_package("slither-analyzer", &install_options).await?;
-    Ok(get_slither_binary_path(venv_path))
-}
-
-fn setup_with_system_commands(project_dir: &PathBuf, venv_path: &PathBuf) -> Result<PathBuf, Box<dyn std::error::Error>> {
-
-    println!("🔧 Creating virtual environment using system commands...");
-    let venv_name = venv_path.file_name()
+/// Creates a Python virtual environment and installs slither-analyzer into it.
+fn setup_environment(
+    project_dir: &PathBuf,
+    venv_path: &PathBuf,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // 1. Create the virtual environment using Python's built-in `venv` module.
+    println!("   - Creating virtual environment at '{}'...", venv_path.display());
+    let venv_name = venv_path
+        .file_name()
         .ok_or("Invalid venv path")?
         .to_str()
         .ok_or("Invalid venv name")?;
-    
+
+    // Try `python3` first, then fall back to `python`.
     let output = Command::new("python3")
         .args(&["-m", "venv", venv_name])
         .current_dir(project_dir)
         .output()?;
-    
+
     if !output.status.success() {
         let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to create virtual environment: {}", error_msg).into());
+        println!("   - 'python3' failed. Trying 'python'...");
+        let fallback_output = Command::new("python")
+            .args(&["-m", "venv", venv_name])
+            .current_dir(project_dir)
+            .output()?;
+
+        if !fallback_output.status.success() {
+            let fallback_error_msg = String::from_utf8_lossy(&fallback_output.stderr);
+            return Err(format!(
+                "Failed to create venv with 'python3' (Error: {}) and 'python' (Error: {})",
+                error_msg.trim(),
+                fallback_error_msg.trim()
+            )
+            .into());
+        }
     }
-    
-    println!("✅ Virtual environment created successfully");
-    
-    let (python_exe, pip_exe, slither_exe) = if cfg!(windows) {
-        (
-            venv_path.join("Scripts").join("python.exe"),
-            venv_path.join("Scripts").join("pip.exe"),
-            venv_path.join("Scripts").join("slither.exe"),
-        )
+    println!("   - Virtual environment created successfully.");
+
+    // 2. Determine the path to the `pip` executable.
+    let pip_exe = if cfg!(target_os = "windows") {
+        venv_path.join("Scripts").join("pip.exe")
     } else {
-        (
-            venv_path.join("bin").join("python"),
-            venv_path.join("bin").join("pip"),
-            venv_path.join("bin").join("slither"),
-        )
+        venv_path.join("bin").join("pip")
     };
-    
-    println!("📦 Upgrading pip...");
+
+    if !pip_exe.exists() {
+        return Err(format!("Could not find pip executable at {}", pip_exe.display()).into());
+    }
+
+    // 3. Install the package using the virtual environment's pip.
+    println!("   - Installing 'slither-analyzer' with pip...");
     let output = Command::new(&pip_exe)
-        .args(&["install", "--upgrade", "pip"])
+        .args(&["install", "--upgrade", "pip", "slither-analyzer"])
         .output()?;
-    
+
     if !output.status.success() {
         let error_msg = String::from_utf8_lossy(&output.stderr);
-        println!("⚠️  Warning: Failed to upgrade pip: {}", error_msg);
-        // Don't fail here, continue with installation
-    } else {
-        println!("✅ Pip upgraded successfully");
+        return Err(format!("Failed to install slither-analyzer: {}", error_msg.trim()).into());
     }
-    
-    println!("🔧 Installing slither-analyzer...");
-    let output = Command::new(&pip_exe)
-        .args(&["install", "slither-analyzer"])
-        .output()?;
-    
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to install slither-analyzer: {}", error_msg).into());
+    println!("   - Slither-analyzer installed successfully.");
+
+    // 4. Verify the installation and return the path to the executable.
+    let slither_exe = get_slither_binary_path(venv_path);
+    if !slither_exe.exists() {
+        return Err("Slither executable not found after installation.".into());
     }
-    
-    println!("✅ Slither-analyzer installed successfully");
-    
-    println!("🔍 Verifying Slither installation...");
-    let output = Command::new(&slither_exe)
-        .args(&["--version"])
-        .output()?;
-    
-    if !output.status.success() {
-        let error_msg = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Slither verification failed: {}", error_msg).into());
-    }
-    
-    let version_output = String::from_utf8_lossy(&output.stdout);
-    println!("✅ Slither verified successfully: {}", version_output.trim());
     
     Ok(slither_exe)
 }
 
+/// Helper function to determine the path to the Slither executable based on the OS.
 fn get_slither_binary_path(venv_path: &PathBuf) -> PathBuf {
-    match env::consts::OS {
-        "windows" => venv_path.join("Scripts").join("slither.exe"),
-        "macos" | "linux" => venv_path.join("bin").join("slither"),
-        _ => {
-            println!("⚠️  Unknown OS, assuming Unix-like structure");
-            venv_path.join("bin").join("slither")
-        }
+    if cfg!(target_os = "windows") {
+        venv_path.join("Scripts").join("slither.exe")
+    } else {
+        venv_path.join("bin").join("slither")
     }
 }
