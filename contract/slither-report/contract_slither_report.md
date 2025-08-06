@@ -1,4 +1,4 @@
-# Smart Contract Security Analysis Report
+# Slither Security Analysis Report
 
 ## 🚨 solc-version
 
