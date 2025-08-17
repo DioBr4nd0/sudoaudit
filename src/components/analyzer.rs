@@ -47,8 +47,16 @@ pub fn run_mythril_analysis(bytecode: &str, venv_path: &Path) -> Result<String, 
         .output()
         .map_err(|e| format!("Failed to execute Mythril: {}", e))?;
 
-    if !output.status.success() && !String::from_utf8_lossy(&output.stderr).contains("issues were found") {
-        return Err(format!("Mythril failed: {}", String::from_utf8_lossy(&output.stderr)));
+    // --- START OF FIX ---
+    // This check is now more robust. If stdout is empty, it means Mythril
+    // crashed before producing a report. In this case, stderr contains the real error.
+    if output.stdout.is_empty() {
+        let error_message = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Mythril failed with a fatal error: {}", error_message));
     }
+
+    // If stdout is not empty, we have a JSON report.
+    // We can ignore any warnings on stderr and proceed.
     String::from_utf8(output.stdout).map_err(|e| format!("Failed to read Mythril output: {}", e))
+    // --- END OF FIX ---
 }
